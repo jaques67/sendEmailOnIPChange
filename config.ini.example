@@ -1,0 +1,20 @@
+[GENERAL]
+time_out = 900
+ip_config_file = ip_address.ini
+ip_check_service = https://ident.me
+
+[SEND_EMAIL]
+port = 465
+server_name = smtp.gmail.com
+from_address = <sender email address>
+to_address = <receiver email address>
+
+[EMAIL_LOGIN]
+username = <email user name>
+port = 993
+password = <email password plain text - will be encrypted after first run>
+imap_address = imap.gmail.com
+
+[ENCRYPTION]
+key = None
+

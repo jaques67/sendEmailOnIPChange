@@ -1,149 +1,179 @@
 #!/usr/bin/python
-# import socket
-import smtplib
-import ssl
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from os.path import exists
-# import urllib.request
 import configparser
-from cryptography.fernet import Fernet
 import os
+import shutil
 import time
-import requests
-import os
-import configparser
+import logging
+from datetime import datetime
+from dotenv import load_dotenv
+import dotenv
+
+from cryptography.fernet import Fernet
+
+from ipInfo import IpInfo
 from mailprocessing import MailProcessing
 
+debug = False
 
 
-def get_old_ip_address(file_name):
+def parse_config_file(file_name) -> configparser:
+    # Read config
+    config_file = configparser.ConfigParser()
+    config_file.read(file_name)
 
-    if not exists(file_name):
-        print('ip config file does not exist')
-        return "0.0.0.0"
-    
-    with open(file_name, "r") as file:
-        old_ip_address = file.read()
+    if debug:
+        print(f'config sections: {config_file.sections()}')
 
-    return old_ip_address
-
-
-def get_current_ip_address(ip_check_service):
-
-    # current_ip_address = urllib.request.urlopen(ip_check_service).read().decode('utf8')
-    response = requests.get(ip_check_service)
-    current_ip_address = response.text
-
-    return current_ip_address
+    return config_file
 
 
-def write_current_ip_address(file_name):
+def update_config_file(filename) -> None:
+    # Write the new structure to the new file
+    modifiedTime = os.path.getmtime(filename)
+    timestamp = datetime.fromtimestamp(modifiedTime).strftime("%b-%d-%Y_%H.%M.%S")
 
-    print('Writing ip config file')
-    with open(file_name, "w") as f:
-        f.write(ip_address)
-
-
-def send_email(server_name, port_address, from_address, to_address, password, text):
-
-    # Create a secure SSL context
-    context = ssl.create_default_context()
-
-    try:
-        with smtplib.SMTP_SSL(server_name, port_address, context=context) as server:
-            server.login(from_address, password)
-            server.sendmail(from_address, to_address, text)
-    except smtplib.SMTPAuthenticationError as e:
-        print(f'Failed to send email. {e}')
-        raise Exception("email authentication failed")
-    except:
-        print('some other error')
+    if os.path.exists(filename):
+        shutil.copy(filename, f'{filename}.{timestamp}')
+    with open(filename, 'w') as configfile:
+        config.write(configfile)
 
 
-def create_email_message(new_ip_address, from_address, to_address):
+def generate_fernet_key() -> bytes:
+    key = Fernet.generate_key()
 
-    msg = MIMEMultipart()
-    msg['From'] = from_address
-    msg['To'] = to_address
-    msg['Subject'] = "IP Address update"
-     
-    # body = encrypt_email_message(f"The new IP address is: {new_ip_address}")
-    body = f"The new IP address is: {new_ip_address}"
-
-    msg.attach(MIMEText(str(body)))
-    text = msg.as_string()
-
-    return text
+    return key
 
 
-def encrypt_email_message(body):
+def create_fernet_environment_variable(dotenv_file):
+    new_key = generate_fernet_key()
 
-    fern_key = config['ENCRYPTION']['key']
-    cipher_suite = Fernet(fern_key)  # f
+    os.environ['FERNET_KEY'] = new_key.decode('UTF-8')
+    if len(dotenv_file) > 0:
+        # Don't write to .env file as it does not exist
+        dotenv.set_key(dotenv_file, "FERNET_KEY", os.environ["FERNET_KEY"])
 
-    byte_string = bytes(body, 'utf-8')
-    ciphered_text = cipher_suite.encrypt(byte_string)  # token
+    return os.environ.get('FERNET_KEY')
+
+
+def get_fernet_environment_variable():
+    key_gen = False
+    file_exist = True
+    dotenv_file = dotenv.find_dotenv()
+
+    if len(dotenv_file) == 0:
+        file_exist = False
+    load_dotenv(dotenv_file)
+
+    old_key = os.environ.get('FERNET_KEY')
+    if old_key is None or old_key == 'None':
+        old_key = create_fernet_environment_variable(dotenv_file)
+        key_gen = True
+
+    return old_key, key_gen, file_exist
+
+
+def encrypt_string(data, key):
+    cipher_suite = Fernet(key.encode('utf-8'))
+    ciphered_text = cipher_suite.encrypt(data.encode('utf-8'))
 
     return ciphered_text
 
 
-def parse_config_file():
+def decrypt_string(data, key):
+    cipher_suite = Fernet(key.encode('utf-8'))
+    clear_message = cipher_suite.decrypt(data).decode()
 
-    # Read config
-    config = configparser.ConfigParser()
-    config.read('config.ini')
-    print(f'config sections: {config.sections()}')
-    return config
+    return clear_message
+
+
+def main() -> None:
+    time_out = int(config['GENERAL']['time_out'])
+
+    ip_info = IpInfo(config)
+    mail = MailProcessing(config)
+    subject = 'Resend IP Address'
+
+    # Infinite loop to check the IP address as specified in the time_out variable as found in the config file.
+    while True:
+        # Is there an email request asking for the IP address to be sent?
+        result = mail.find_unread_subject(subject)
+
+        if result:
+            logger.info("Resending IP address.")
+            if debug:
+                print(f'Resending IP address.')
+
+            # delete the file so that it can be resent
+            ip_info.delete_ip_file()
+            mail.mark_email_as_read()
+
+        if ip_info.different_ip_address():
+
+            try:
+                logger.info("About to send email as ip addresses differed.")
+                if debug:
+                    print('About to send email as ip addresses differed')
+
+                send_mail = MailProcessing(config)
+
+                subject = "IP Address update"
+                body = f"The new IP address is: {ip_info.get_current_ip_address()}"
+                logger.debug(body)
+
+                send_mail.send_email(subject, body)
+                del send_mail
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f'Exception occurred: {e}')
+                raise
+
+        time.sleep(time_out)
 
 
 if __name__ == "__main__":
-    
-    # 
+    # change the program path to the real path processing from.
     os.chdir(os.path.dirname(os.path.realpath(__file__)))
-    config = parse_config_file()
+    file_name = 'config.ini'
+    config = parse_config_file(file_name)
 
-    time_out = int(config['GENERAL']['time_out'])
-    username = config['READ_EMAIL']['username']
-    imap_port = config['READ_EMAIL']['port']
-    imap_address = config['READ_EMAIL']['imap_address']
-    
-    config_ip_address = dict(config['SEND_EMAIL'])
-    file_name = config_ip_address.get('ip_config_file')
+    fernet_key = config['ENCRYPTION']['key']
 
-    ip_check_service = config['SEND_EMAIL']['ip_check_service']
-    port_address = int(config['SEND_EMAIL']['port'])
-    server_name = config['SEND_EMAIL']['server_name']
+    logging.basicConfig(filename="log.txt", level=logging.DEBUG, format="%(asctime)s %(message)s")  # , filemode="w")
+    logger = logging.getLogger('ip_logs')
 
-    from_address = config['EMAIL']['from_address']
-    to_address = config['EMAIL']['to_address']
-    password = config['EMAIL']['password']
+    # Preference is given to reading from the config file. If it does not exist on the config file it will try and
+    # read the value from the .env file.
+    # Enable write_key if you want to write the fernet key to your config.ini file
+    write_key = config['ENCRYPTION']['False']
+    if write_key == 'False':
+        write_key = False
+    else:
+        write_key = True
 
-    mail = MailProcessing(username, password, imap_port, imap_address)
-    subject = 'Resend IP Address'
+    if fernet_key is None or fernet_key == 'None':
+        # Try reading from environment file
+        fernet_key, key_generated, file_exists = get_fernet_environment_variable()
+        print(f'fernet key: {fernet_key}')
 
-    while True:
-        result = mail.resend_ip_address(subject)
+        # A new key was generated. Assume that the password on the file is open, so encrypt and save it to the
+        # config.ini file
+        password = config['EMAIL_LOGIN']['password']
+        if key_generated:
+            encrypted_password = encrypt_string(password, fernet_key)
+            config.set('EMAIL_LOGIN', 'password', encrypted_password.decode('utf-8'))
+            update_config_file(file_name)
+            print(config['EMAIL_LOGIN']['password'])
 
-        if result:
-            print(f'Resending IP address.')
-            # delete the file so that it can be resent
-            if exists(file_name): 
-                os.remove(file_name)
-            mail.mark_email_as_read()
+        # password was encrypted so decrypt it
+        print(f'fernet key 2: {fernet_key}')
+        decrypted_password = decrypt_string(config['EMAIL_LOGIN']['password'], fernet_key)
+        print(f'decrypted password: {decrypted_password}')
+        config['EMAIL_LOGIN']['password'] = decrypted_password
+        print(config['EMAIL_LOGIN']['password'])
 
-        # check ip info
-        old_ip_address = get_old_ip_address(file_name)
-        ip_address = get_current_ip_address(ip_check_service)
-
-        if ip_address != old_ip_address:
-            write_current_ip_address(file_name)
-            text = create_email_message(ip_address, from_address, to_address)
-
-            try:
-                print('About to send email as ip addresses differed')
-                send_email(server_name, port_address, from_address, to_address, password, text)
-            except:
-                break
-
-        time.sleep(time_out)
+        # if a key was generated and the .env file does not exist, force a write to the config file.
+        if (key_generated and not file_exists) or (key_generated and write_key):
+            config.set('ENCRYPTION', 'key', fernet_key)
+            update_config_file(file_name)
+    main()
